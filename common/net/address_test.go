@@ -73,3 +73,31 @@ func TestNetIPv4Address(t *testing.T) {
 	assert(addr, IsIPv4)
 	assert(addr.String(), Equals, "1.2.3.4")
 }
+
+func TestParseIPv6Address(t *testing.T) {
+	assert := With(t)
+
+	ip := ParseAddress("[2001:4860:0:2001::68]")
+	assert(ip, IsIPv6)
+	assert(ip.String(), Equals, "[2001:4860:0:2001::68]")
+
+	ip = ParseAddress("[::ffff:123.151.71.143]")
+	assert(ip, IsIPv4)
+	assert(ip.String(), Equals, "123.151.71.143")
+}
+
+func TestInvalidAddressConvertion(t *testing.T) {
+	assert := With(t)
+
+	assert(func() { ParseAddress("8.8.8.8").Domain() }, Panics)
+	assert(func() { ParseAddress("2001:4860:0:2001::68").Domain() }, Panics)
+	assert(func() { ParseAddress("v2ray.com").IP() }, Panics)
+}
+
+func TestIPOrDomain(t *testing.T) {
+	assert := With(t)
+
+	assert(NewIPOrDomain(ParseAddress("v2ray.com")).AsAddress(), Equals, ParseAddress("v2ray.com"))
+	assert(NewIPOrDomain(ParseAddress("8.8.8.8")).AsAddress(), Equals, ParseAddress("8.8.8.8"))
+	assert(NewIPOrDomain(ParseAddress("2001:4860:0:2001::68")).AsAddress(), Equals, ParseAddress("2001:4860:0:2001::68"))
+}

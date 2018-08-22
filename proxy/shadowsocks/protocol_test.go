@@ -3,6 +3,7 @@ package shadowsocks_test
 import (
 	"testing"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
@@ -29,7 +30,7 @@ func TestUDPEncoding(t *testing.T) {
 		},
 	}
 
-	data := buf.NewLocal(256)
+	data := buf.New()
 	data.AppendSupplier(serial.WriteString("test string"))
 	encodedData, err := EncodeUDPPacket(request, data.Bytes())
 	assert(err, IsNil)
@@ -39,6 +40,7 @@ func TestUDPEncoding(t *testing.T) {
 	assert(decodedData.Bytes(), Equals, data.Bytes())
 	assert(decodedRequest.Address, Equals, request.Address)
 	assert(decodedRequest.Port, Equals, request.Port)
+	assert(decodedRequest.Command, Equals, request.Command)
 }
 
 func TestTCPRequest(t *testing.T) {
@@ -103,8 +105,7 @@ func TestTCPRequest(t *testing.T) {
 
 	runTest := func(request *protocol.RequestHeader, payload []byte) {
 		data := buf.New()
-		defer data.Release()
-		data.Append(payload)
+		common.Must2(data.Write(payload))
 
 		cache := buf.New()
 		defer cache.Release()
@@ -112,14 +113,15 @@ func TestTCPRequest(t *testing.T) {
 		writer, err := WriteTCPRequest(request, cache)
 		assert(err, IsNil)
 
-		assert(writer.Write(buf.NewMultiBufferValue(data)), IsNil)
+		assert(writer.WriteMultiBuffer(buf.NewMultiBufferValue(data)), IsNil)
 
 		decodedRequest, reader, err := ReadTCPSession(request.User, cache)
 		assert(err, IsNil)
 		assert(decodedRequest.Address, Equals, request.Address)
 		assert(decodedRequest.Port, Equals, request.Port)
+		assert(decodedRequest.Command, Equals, request.Command)
 
-		decodedData, err := reader.Read()
+		decodedData, err := reader.ReadMultiBuffer()
 		assert(err, IsNil)
 		assert(decodedData[0].String(), Equals, string(payload))
 	}
@@ -140,7 +142,9 @@ func TestUDPReaderWriter(t *testing.T) {
 		}),
 	}
 	cache := buf.New()
-	writer := buf.NewSequentialWriter(&UDPWriter{
+	defer cache.Release()
+
+	writer := &buf.SequentialWriter{Writer: &UDPWriter{
 		Writer: cache,
 		Request: &protocol.RequestHeader{
 			Version: Version,
@@ -149,28 +153,32 @@ func TestUDPReaderWriter(t *testing.T) {
 			User:    user,
 			Option:  RequestOptionOneTimeAuth,
 		},
-	})
+	}}
 
 	reader := &UDPReader{
 		Reader: cache,
 		User:   user,
 	}
 
-	b := buf.New()
-	b.AppendSupplier(serial.WriteString("test payload"))
-	err := writer.Write(buf.NewMultiBufferValue(b))
-	assert(err, IsNil)
+	{
+		b := buf.New()
+		b.AppendSupplier(serial.WriteString("test payload"))
+		err := writer.WriteMultiBuffer(buf.NewMultiBufferValue(b))
+		assert(err, IsNil)
 
-	payload, err := reader.Read()
-	assert(err, IsNil)
-	assert(payload[0].String(), Equals, "test payload")
+		payload, err := reader.ReadMultiBuffer()
+		assert(err, IsNil)
+		assert(payload[0].String(), Equals, "test payload")
+	}
 
-	b = buf.New()
-	b.AppendSupplier(serial.WriteString("test payload 2"))
-	err = writer.Write(buf.NewMultiBufferValue(b))
-	assert(err, IsNil)
+	{
+		b := buf.New()
+		b.AppendSupplier(serial.WriteString("test payload 2"))
+		err := writer.WriteMultiBuffer(buf.NewMultiBufferValue(b))
+		assert(err, IsNil)
 
-	payload, err = reader.Read()
-	assert(err, IsNil)
-	assert(payload[0].String(), Equals, "test payload 2")
+		payload, err := reader.ReadMultiBuffer()
+		assert(err, IsNil)
+		assert(payload[0].String(), Equals, "test payload 2")
+	}
 }

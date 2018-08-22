@@ -5,18 +5,18 @@ import (
 	"sync"
 	"time"
 
-	"v2ray.com/core/app/log"
+	"v2ray.com/core"
 	"v2ray.com/core/app/proxyman"
 	"v2ray.com/core/app/proxyman/mux"
 	"v2ray.com/core/common/dice"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/task"
 	"v2ray.com/core/proxy"
 )
 
 type DynamicInboundHandler struct {
 	tag            string
-	ctx            context.Context
-	cancel         context.CancelFunc
+	v              *core.Instance
 	proxyConfig    interface{}
 	receiverConfig *proxyman.ReceiverConfig
 	portMutex      sync.Mutex
@@ -25,18 +25,23 @@ type DynamicInboundHandler struct {
 	worker         []worker
 	lastRefresh    time.Time
 	mux            *mux.Server
+	task           *task.Periodic
 }
 
 func NewDynamicInboundHandler(ctx context.Context, tag string, receiverConfig *proxyman.ReceiverConfig, proxyConfig interface{}) (*DynamicInboundHandler, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	v := core.MustFromContext(ctx)
 	h := &DynamicInboundHandler{
-		ctx:            ctx,
 		tag:            tag,
-		cancel:         cancel,
 		proxyConfig:    proxyConfig,
 		receiverConfig: receiverConfig,
 		portsInUse:     make(map[net.Port]bool),
 		mux:            mux.NewServer(ctx),
+		v:              v,
+	}
+
+	h.task = &task.Periodic{
+		Interval: time.Minute * time.Duration(h.receiverConfig.AllocationStrategy.GetRefreshValue()),
+		Execute:  h.refresh,
 	}
 
 	return h, nil
@@ -60,13 +65,13 @@ func (h *DynamicInboundHandler) allocatePort() net.Port {
 	}
 }
 
-func (h *DynamicInboundHandler) waitAnyCloseWorkers(ctx context.Context, cancel context.CancelFunc, workers []worker, duration time.Duration) {
-	time.Sleep(duration)
-	cancel()
+func (h *DynamicInboundHandler) closeWorkers(workers []worker) {
 	ports2Del := make([]net.Port, len(workers))
 	for idx, worker := range workers {
 		ports2Del[idx] = worker.Port()
-		worker.Close()
+		if err := worker.Close(); err != nil {
+			newError("failed to close worker").Base(err).WriteToLog()
+		}
 	}
 
 	h.portMutex.Lock()
@@ -81,34 +86,39 @@ func (h *DynamicInboundHandler) refresh() error {
 
 	timeout := time.Minute * time.Duration(h.receiverConfig.AllocationStrategy.GetRefreshValue()) * 2
 	concurrency := h.receiverConfig.AllocationStrategy.GetConcurrencyValue()
-	ctx, cancel := context.WithTimeout(h.ctx, timeout)
 	workers := make([]worker, 0, concurrency)
 
 	address := h.receiverConfig.Listen.AsAddress()
 	if address == nil {
 		address = net.AnyIP
 	}
+
+	uplinkCounter, downlinkCounter := getStatCounter(h.v, h.tag)
+
 	for i := uint32(0); i < concurrency; i++ {
 		port := h.allocatePort()
-		p, err := proxy.CreateInboundHandler(ctx, h.proxyConfig)
+		rawProxy, err := core.CreateObject(h.v, h.proxyConfig)
 		if err != nil {
-			log.Trace(newError("failed to create proxy instance").Base(err).AtWarning())
+			newError("failed to create proxy instance").Base(err).AtWarning().WriteToLog()
 			continue
 		}
+		p := rawProxy.(proxy.Inbound)
 		nl := p.Network()
 		if nl.HasNetwork(net.Network_TCP) {
 			worker := &tcpWorker{
-				tag:          h.tag,
-				address:      address,
-				port:         port,
-				proxy:        p,
-				stream:       h.receiverConfig.StreamSettings,
-				recvOrigDest: h.receiverConfig.ReceiveOriginalDestination,
-				dispatcher:   h.mux,
-				sniffers:     h.receiverConfig.DomainOverride,
+				tag:             h.tag,
+				address:         address,
+				port:            port,
+				proxy:           p,
+				stream:          h.receiverConfig.StreamSettings,
+				recvOrigDest:    h.receiverConfig.ReceiveOriginalDestination,
+				dispatcher:      h.mux,
+				sniffingConfig:  h.receiverConfig.GetEffectiveSniffingSettings(),
+				uplinkCounter:   uplinkCounter,
+				downlinkCounter: downlinkCounter,
 			}
 			if err := worker.Start(); err != nil {
-				log.Trace(newError("failed to create TCP worker").Base(err).AtWarning())
+				newError("failed to create TCP worker").Base(err).AtWarning().WriteToLog()
 				continue
 			}
 			workers = append(workers, worker)
@@ -116,15 +126,17 @@ func (h *DynamicInboundHandler) refresh() error {
 
 		if nl.HasNetwork(net.Network_UDP) {
 			worker := &udpWorker{
-				tag:          h.tag,
-				proxy:        p,
-				address:      address,
-				port:         port,
-				recvOrigDest: h.receiverConfig.ReceiveOriginalDestination,
-				dispatcher:   h.mux,
+				tag:             h.tag,
+				proxy:           p,
+				address:         address,
+				port:            port,
+				recvOrigDest:    h.receiverConfig.ReceiveOriginalDestination,
+				dispatcher:      h.mux,
+				uplinkCounter:   uplinkCounter,
+				downlinkCounter: downlinkCounter,
 			}
 			if err := worker.Start(); err != nil {
-				log.Trace(newError("failed to create UDP worker").Base(err).AtWarning())
+				newError("failed to create UDP worker").Base(err).AtWarning().WriteToLog()
 				continue
 			}
 			workers = append(workers, worker)
@@ -135,36 +147,22 @@ func (h *DynamicInboundHandler) refresh() error {
 	h.worker = workers
 	h.workerMutex.Unlock()
 
-	go h.waitAnyCloseWorkers(ctx, cancel, workers, timeout)
+	time.AfterFunc(timeout, func() {
+		h.closeWorkers(workers)
+	})
 
 	return nil
 }
 
-func (h *DynamicInboundHandler) monitor() {
-	timer := time.NewTicker(time.Minute * time.Duration(h.receiverConfig.AllocationStrategy.GetRefreshValue()))
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-h.ctx.Done():
-			return
-		case <-timer.C:
-			h.refresh()
-		}
-	}
-}
-
 func (h *DynamicInboundHandler) Start() error {
-	err := h.refresh()
-	go h.monitor()
-	return err
+	return h.task.Start()
 }
 
-func (h *DynamicInboundHandler) Close() {
-	h.cancel()
+func (h *DynamicInboundHandler) Close() error {
+	return h.task.Close()
 }
 
-func (h *DynamicInboundHandler) GetRandomInboundProxy() (proxy.Inbound, net.Port, int) {
+func (h *DynamicInboundHandler) GetRandomInboundProxy() (interface{}, net.Port, int) {
 	h.workerMutex.RLock()
 	defer h.workerMutex.RUnlock()
 
@@ -174,4 +172,8 @@ func (h *DynamicInboundHandler) GetRandomInboundProxy() (proxy.Inbound, net.Port
 	w := h.worker[dice.Roll(len(h.worker))]
 	expire := h.receiverConfig.AllocationStrategy.GetRefreshValue() - uint32(time.Since(h.lastRefresh)/time.Minute)
 	return w.Proxy(), w.Port(), int(expire)
+}
+
+func (h *DynamicInboundHandler) Tag() string {
+	return h.tag
 }

@@ -6,7 +6,9 @@ import (
 	"crypto/sha1"
 	"io"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/bytespool"
 	"v2ray.com/core/common/serial"
 )
 
@@ -29,7 +31,7 @@ func NewAuthenticator(keygen KeyGenerator) *Authenticator {
 
 func (v *Authenticator) Authenticate(data []byte) buf.Supplier {
 	hasher := hmac.New(sha1.New, v.key())
-	hasher.Write(data)
+	common.Must2(hasher.Write(data))
 	res := hasher.Sum(nil)
 	return func(b []byte) (int, error) {
 		return copy(b, res[:AuthSize]), nil
@@ -68,39 +70,33 @@ func NewChunkReader(reader io.Reader, auth *Authenticator) *ChunkReader {
 	}
 }
 
-func (v *ChunkReader) Read() (buf.MultiBuffer, error) {
-	buffer := buf.New()
-	if err := buffer.AppendSupplier(buf.ReadFullFrom(v.reader, 2)); err != nil {
-		buffer.Release()
-		return nil, err
+func (v *ChunkReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	size, err := serial.ReadUint16(v.reader)
+	if err != nil {
+		return nil, newError("failed to read size")
 	}
-	// There is a potential buffer overflow here. Large buffer is 64K bytes,
-	// while uin16 + 10 will be more than that
-	length := serial.BytesToUint16(buffer.BytesTo(2)) + AuthSize
-	if length > buf.Size {
-		// Theoretically the size of a chunk is 64K, but most Shadowsocks implementations used <4K buffer.
-		buffer.Release()
-		buffer = buf.NewLocal(int(length) + 128)
-	}
+	size += AuthSize
 
-	buffer.Clear()
-	if err := buffer.AppendSupplier(buf.ReadFullFrom(v.reader, int(length))); err != nil {
-		buffer.Release()
+	buffer := bytespool.Alloc(int32(size))
+	defer bytespool.Free(buffer)
+
+	if _, err := io.ReadFull(v.reader, buffer[:size]); err != nil {
 		return nil, err
 	}
 
-	authBytes := buffer.BytesTo(AuthSize)
-	payload := buffer.BytesFrom(AuthSize)
+	authBytes := buffer[:AuthSize]
+	payload := buffer[AuthSize:size]
 
 	actualAuthBytes := make([]byte, AuthSize)
 	v.auth.Authenticate(payload)(actualAuthBytes)
 	if !bytes.Equal(authBytes, actualAuthBytes) {
-		buffer.Release()
 		return nil, newError("invalid auth")
 	}
-	buffer.SliceFrom(AuthSize)
 
-	return buf.NewMultiBufferValue(buffer), nil
+	var mb buf.MultiBuffer
+	common.Must2(mb.Write(payload))
+
+	return mb, nil
 }
 
 type ChunkWriter struct {
@@ -117,15 +113,15 @@ func NewChunkWriter(writer io.Writer, auth *Authenticator) *ChunkWriter {
 	}
 }
 
-// Write implements buf.MultiBufferWriter.
-func (w *ChunkWriter) Write(mb buf.MultiBuffer) error {
+// WriteMultiBuffer implements buf.Writer.
+func (w *ChunkWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	defer mb.Release()
 
 	for {
 		payloadLen, _ := mb.Read(w.buffer[2+AuthSize:])
 		serial.Uint16ToBytes(uint16(payloadLen), w.buffer[:0])
 		w.auth.Authenticate(w.buffer[2+AuthSize : 2+AuthSize+payloadLen])(w.buffer[2:])
-		if _, err := w.writer.Write(w.buffer[:2+AuthSize+payloadLen]); err != nil {
+		if err := buf.WriteAllBytes(w.writer, w.buffer[:2+AuthSize+payloadLen]); err != nil {
 			return err
 		}
 		if mb.IsEmpty() {

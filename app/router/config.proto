@@ -17,8 +17,10 @@ message Domain {
     Plain = 0;
     // The value is used as a regular expression.
     Regex = 1;
-    // The value is a domain.
+    // The value is a root domain.
     Domain = 2;
+    // The value is a domain.
+    Full = 3;
   }
 
   // Domain matching type.
@@ -46,6 +48,15 @@ message GeoIPList {
   repeated GeoIP entry = 1;
 }
 
+message GeoSite {
+  string country_code = 1;
+  repeated Domain domain = 2;
+}
+
+message GeoSiteList{
+  repeated GeoSite entry = 1;
+}
+
 message RoutingRule {
   string tag = 1;
   repeated Domain domain = 2;
@@ -55,6 +66,7 @@ message RoutingRule {
   repeated CIDR source_cidr = 6;
   repeated string user_email = 7;
   repeated string inbound_tag = 8;
+  repeated string protocol = 9;
 }
 
 message Config {
@@ -67,6 +79,9 @@ message Config {
 
     // Resolve to IP if the domain doesn't match any rules.
     IpIfNonMatch = 2;
+
+    // Resolve to IP if any rule requires IP matching.
+    IpOnDemand = 3;
   }
   DomainStrategy domain_strategy = 1;
   repeated RoutingRule rule = 2;

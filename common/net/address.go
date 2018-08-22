@@ -2,9 +2,9 @@ package net
 
 import (
 	"net"
+	"strings"
 
-	"v2ray.com/core/app/log"
-	"v2ray.com/core/common/predicate"
+	"v2ray.com/core/common/compare"
 )
 
 var (
@@ -22,7 +22,7 @@ var (
 )
 
 // AddressFamily is the type of address.
-type AddressFamily int
+type AddressFamily byte
 
 const (
 	// AddressFamilyIPv4 represents address as IPv4
@@ -35,7 +35,7 @@ const (
 	AddressFamilyDomain = AddressFamily(2)
 )
 
-// Either returns true if current AddressFamily matches any of the AddressFamilys provided.
+// Either returns true if current AddressFamily matches any of the AddressFamilies provided.
 func (af AddressFamily) Either(fs ...AddressFamily) bool {
 	for _, f := range fs {
 		if af == f {
@@ -73,6 +73,13 @@ type Address interface {
 // ParseAddress parses a string into an Address. The return value will be an IPAddress when
 // the string is in the form of IPv4 or IPv6 address, or a DomainAddress otherwise.
 func ParseAddress(addr string) Address {
+	// Handle IPv6 address in form as "[2001:4860:0:2001::68]"
+	lenAddr := len(addr)
+	if lenAddr > 0 && addr[0] == '[' && addr[lenAddr-1] == ']' {
+		addr = addr[1 : lenAddr-1]
+	}
+	addr = strings.TrimSpace(addr)
+
 	ip := net.ParseIP(addr)
 	if ip != nil {
 		return IPAddress(ip)
@@ -87,7 +94,7 @@ func IPAddress(ip []byte) Address {
 		var addr ipv4Address = [4]byte{ip[0], ip[1], ip[2], ip[3]}
 		return addr
 	case net.IPv6len:
-		if predicate.BytesAll(ip[0:10], 0) && predicate.BytesAll(ip[10:12], 0xff) {
+		if compare.BytesAll(ip[0:10], 0) && compare.BytesAll(ip[10:12], 0xff) {
 			return IPAddress(ip[12:16])
 		}
 		var addr ipv6Address = [16]byte{
@@ -98,7 +105,7 @@ func IPAddress(ip []byte) Address {
 		}
 		return addr
 	default:
-		log.Trace(newError("invalid IP format: ", ip).AtError())
+		newError("invalid IP format: ", ip).AtError().WriteToLog()
 		return nil
 	}
 }

@@ -1,7 +1,6 @@
 package mux_test
 
 import (
-	"context"
 	"io"
 	"testing"
 
@@ -9,14 +8,14 @@ import (
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
-	"v2ray.com/core/transport/ray"
+	"v2ray.com/core/transport/pipe"
 	. "v2ray.com/ext/assert"
 )
 
 func readAll(reader buf.Reader) (buf.MultiBuffer, error) {
-	mb := buf.NewMultiBuffer()
+	var mb buf.MultiBuffer
 	for {
-		b, err := reader.Read()
+		b, err := reader.ReadMultiBuffer()
 		if err == io.EOF {
 			break
 		}
@@ -31,21 +30,21 @@ func readAll(reader buf.Reader) (buf.MultiBuffer, error) {
 func TestReaderWriter(t *testing.T) {
 	assert := With(t)
 
-	stream := ray.NewStream(context.Background())
+	pReader, pWriter := pipe.New(pipe.WithSizeLimit(1024))
 
 	dest := net.TCPDestination(net.DomainAddress("v2ray.com"), 80)
-	writer := NewWriter(1, dest, stream, protocol.TransferTypeStream)
+	writer := NewWriter(1, dest, pWriter, protocol.TransferTypeStream)
 
 	dest2 := net.TCPDestination(net.LocalHostIP, 443)
-	writer2 := NewWriter(2, dest2, stream, protocol.TransferTypeStream)
+	writer2 := NewWriter(2, dest2, pWriter, protocol.TransferTypeStream)
 
 	dest3 := net.TCPDestination(net.LocalHostIPv6, 18374)
-	writer3 := NewWriter(3, dest3, stream, protocol.TransferTypeStream)
+	writer3 := NewWriter(3, dest3, pWriter, protocol.TransferTypeStream)
 
 	writePayload := func(writer *Writer, payload ...byte) error {
 		b := buf.New()
-		b.Append(payload)
-		return writer.Write(buf.NewMultiBufferValue(b))
+		b.Write(payload)
+		return writer.WriteMultiBuffer(buf.NewMultiBufferValue(b))
 	}
 
 	assert(writePayload(writer, 'a', 'b', 'c', 'd'), IsNil)
@@ -60,8 +59,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(writePayload(writer2, 'y'), IsNil)
 	writer2.Close()
 
-	bytesReader := buf.ToBytesReader(stream)
-	streamReader := NewStreamReader(bytesReader)
+	bytesReader := &buf.BufferedReader{Reader: pReader}
 
 	meta, err := ReadMetadata(bytesReader)
 	assert(err, IsNil)
@@ -70,7 +68,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(meta.Target, Equals, dest)
 	assert(byte(meta.Option), Equals, byte(OptionData))
 
-	data, err := readAll(streamReader)
+	data, err := readAll(NewStreamReader(bytesReader))
 	assert(err, IsNil)
 	assert(len(data), Equals, 1)
 	assert(data[0].String(), Equals, "abcd")
@@ -88,7 +86,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(meta.SessionID, Equals, uint16(1))
 	assert(byte(meta.Option), Equals, byte(1))
 
-	data, err = readAll(streamReader)
+	data, err = readAll(NewStreamReader(bytesReader))
 	assert(err, IsNil)
 	assert(len(data), Equals, 1)
 	assert(data[0].String(), Equals, "efgh")
@@ -100,7 +98,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(byte(meta.Option), Equals, byte(1))
 	assert(meta.Target, Equals, dest3)
 
-	data, err = readAll(streamReader)
+	data, err = readAll(NewStreamReader(bytesReader))
 	assert(err, IsNil)
 	assert(len(data), Equals, 1)
 	assert(data[0].String(), Equals, "x")
@@ -123,7 +121,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(meta.SessionID, Equals, uint16(2))
 	assert(byte(meta.Option), Equals, byte(1))
 
-	data, err = readAll(streamReader)
+	data, err = readAll(NewStreamReader(bytesReader))
 	assert(err, IsNil)
 	assert(len(data), Equals, 1)
 	assert(data[0].String(), Equals, "y")
@@ -134,7 +132,7 @@ func TestReaderWriter(t *testing.T) {
 	assert(meta.SessionID, Equals, uint16(2))
 	assert(byte(meta.Option), Equals, byte(0))
 
-	stream.Close()
+	pWriter.Close()
 
 	meta, err = ReadMetadata(bytesReader)
 	assert(err, IsNotNil)

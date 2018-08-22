@@ -3,7 +3,6 @@ package kcp_test
 import (
 	"testing"
 
-	"v2ray.com/core/common/buf"
 	. "v2ray.com/core/transport/internet/kcp"
 	. "v2ray.com/ext/assert"
 )
@@ -19,21 +18,19 @@ func TestBadSegment(t *testing.T) {
 func TestDataSegment(t *testing.T) {
 	assert := With(t)
 
-	b := buf.NewLocal(512)
-	b.Append([]byte{'a', 'b', 'c', 'd'})
 	seg := &DataSegment{
 		Conv:        1,
 		Timestamp:   3,
 		Number:      4,
 		SendingNext: 5,
-		Data:        b,
 	}
+	seg.Data().Write([]byte{'a', 'b', 'c', 'd'})
 
 	nBytes := seg.ByteSize()
 	bytes := make([]byte, nBytes)
 	seg.Bytes()(bytes)
 
-	assert(len(bytes), Equals, nBytes)
+	assert(int32(len(bytes)), Equals, nBytes)
 
 	iseg, _ := ReadSegment(bytes)
 	seg2 := iseg.(*DataSegment)
@@ -41,27 +38,25 @@ func TestDataSegment(t *testing.T) {
 	assert(seg2.Timestamp, Equals, seg.Timestamp)
 	assert(seg2.SendingNext, Equals, seg.SendingNext)
 	assert(seg2.Number, Equals, seg.Number)
-	assert(seg2.Data.Bytes(), Equals, seg.Data.Bytes())
+	assert(seg2.Data().Bytes(), Equals, seg.Data().Bytes())
 }
 
 func Test1ByteDataSegment(t *testing.T) {
 	assert := With(t)
 
-	b := buf.NewLocal(512)
-	b.AppendBytes('a')
 	seg := &DataSegment{
 		Conv:        1,
 		Timestamp:   3,
 		Number:      4,
 		SendingNext: 5,
-		Data:        b,
 	}
+	seg.Data().WriteBytes('a')
 
 	nBytes := seg.ByteSize()
 	bytes := make([]byte, nBytes)
 	seg.Bytes()(bytes)
 
-	assert(len(bytes), Equals, nBytes)
+	assert(int32(len(bytes)), Equals, nBytes)
 
 	iseg, _ := ReadSegment(bytes)
 	seg2 := iseg.(*DataSegment)
@@ -69,7 +64,7 @@ func Test1ByteDataSegment(t *testing.T) {
 	assert(seg2.Timestamp, Equals, seg.Timestamp)
 	assert(seg2.SendingNext, Equals, seg.SendingNext)
 	assert(seg2.Number, Equals, seg.Number)
-	assert(seg2.Data.Bytes(), Equals, seg.Data.Bytes())
+	assert(seg2.Data().Bytes(), Equals, seg.Data().Bytes())
 }
 
 func TestACKSegment(t *testing.T) {
@@ -87,7 +82,7 @@ func TestACKSegment(t *testing.T) {
 	bytes := make([]byte, nBytes)
 	seg.Bytes()(bytes)
 
-	assert(len(bytes), Equals, nBytes)
+	assert(int32(len(bytes)), Equals, nBytes)
 
 	iseg, _ := ReadSegment(bytes)
 	seg2 := iseg.(*AckSegment)
@@ -105,19 +100,19 @@ func TestCmdSegment(t *testing.T) {
 	assert := With(t)
 
 	seg := &CmdOnlySegment{
-		Conv:         1,
-		Cmd:          CommandPing,
-		Option:       SegmentOptionClose,
-		SendingNext:  11,
-		ReceivinNext: 13,
-		PeerRTO:      15,
+		Conv:          1,
+		Cmd:           CommandPing,
+		Option:        SegmentOptionClose,
+		SendingNext:   11,
+		ReceivingNext: 13,
+		PeerRTO:       15,
 	}
 
 	nBytes := seg.ByteSize()
 	bytes := make([]byte, nBytes)
 	seg.Bytes()(bytes)
 
-	assert(len(bytes), Equals, nBytes)
+	assert(int32(len(bytes)), Equals, nBytes)
 
 	iseg, _ := ReadSegment(bytes)
 	seg2 := iseg.(*CmdOnlySegment)
@@ -125,6 +120,6 @@ func TestCmdSegment(t *testing.T) {
 	assert(byte(seg2.Command()), Equals, byte(seg.Command()))
 	assert(byte(seg2.Option), Equals, byte(seg.Option))
 	assert(seg2.SendingNext, Equals, seg.SendingNext)
-	assert(seg2.ReceivinNext, Equals, seg.ReceivinNext)
+	assert(seg2.ReceivingNext, Equals, seg.ReceivingNext)
 	assert(seg2.PeerRTO, Equals, seg.PeerRTO)
 }

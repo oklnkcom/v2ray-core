@@ -2,11 +2,12 @@ package router
 
 import (
 	"context"
-	"regexp"
 	"strings"
 
+	"v2ray.com/core/app/dispatcher"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
+	"v2ray.com/core/common/strmatcher"
 	"v2ray.com/core/proxy"
 )
 
@@ -64,71 +65,66 @@ func (v *AnyCondition) Len() int {
 	return len(*v)
 }
 
-type PlainDomainMatcher string
-
-func NewPlainDomainMatcher(pattern string) Condition {
-	return PlainDomainMatcher(pattern)
+var matcherTypeMap = map[Domain_Type]strmatcher.Type{
+	Domain_Plain:  strmatcher.Substr,
+	Domain_Regex:  strmatcher.Regex,
+	Domain_Domain: strmatcher.Domain,
+	Domain_Full:   strmatcher.Full,
 }
 
-func (v PlainDomainMatcher) Apply(ctx context.Context) bool {
-	dest, ok := proxy.TargetFromContext(ctx)
-	if !ok {
-		return false
+func domainToMatcher(domain *Domain) (strmatcher.Matcher, error) {
+	matcherType, f := matcherTypeMap[domain.Type]
+	if !f {
+		return nil, newError("unsupported domain type", domain.Type)
 	}
 
-	if !dest.Address.Family().IsDomain() {
-		return false
-	}
-	domain := dest.Address.Domain()
-	return strings.Contains(domain, string(v))
-}
-
-type RegexpDomainMatcher struct {
-	pattern *regexp.Regexp
-}
-
-func NewRegexpDomainMatcher(pattern string) (*RegexpDomainMatcher, error) {
-	r, err := regexp.Compile(pattern)
+	matcher, err := matcherType.New(domain.Value)
 	if err != nil {
-		return nil, err
+		return nil, newError("failed to create domain matcher").Base(err)
 	}
-	return &RegexpDomainMatcher{
-		pattern: r,
+
+	return matcher, nil
+}
+
+type DomainMatcher struct {
+	matchers strmatcher.IndexMatcher
+}
+
+func NewDomainMatcher(domains []*Domain) (*DomainMatcher, error) {
+	g := new(strmatcher.MatcherGroup)
+	for _, d := range domains {
+		m, err := domainToMatcher(d)
+		if err != nil {
+			return nil, err
+		}
+		g.Add(m)
+	}
+
+	if len(domains) < 64 {
+		return &DomainMatcher{
+			matchers: g,
+		}, nil
+	}
+
+	return &DomainMatcher{
+		matchers: strmatcher.NewCachedMatcherGroup(g),
 	}, nil
 }
 
-func (v *RegexpDomainMatcher) Apply(ctx context.Context) bool {
+func (m *DomainMatcher) ApplyDomain(domain string) bool {
+	return m.matchers.Match(domain) > 0
+}
+
+func (m *DomainMatcher) Apply(ctx context.Context) bool {
 	dest, ok := proxy.TargetFromContext(ctx)
 	if !ok {
 		return false
 	}
+
 	if !dest.Address.Family().IsDomain() {
 		return false
 	}
-	domain := dest.Address.Domain()
-	return v.pattern.MatchString(strings.ToLower(domain))
-}
-
-type SubDomainMatcher string
-
-func NewSubDomainMatcher(p string) Condition {
-	return SubDomainMatcher(p)
-}
-
-func (m SubDomainMatcher) Apply(ctx context.Context) bool {
-	dest, ok := proxy.TargetFromContext(ctx)
-	if !ok {
-		return false
-	}
-	if !dest.Address.Family().IsDomain() {
-		return false
-	}
-	domain := dest.Address.Domain()
-	pattern := string(m)
-	if !strings.HasSuffix(domain, pattern) {
-		return false
-	}
-	return len(domain) == len(pattern) || domain[len(domain)-len(pattern)-1] == '.'
+	return m.ApplyDomain(dest.Address.Domain())
 }
 
 type CIDRMatcher struct {
@@ -149,8 +145,9 @@ func NewCIDRMatcher(ip []byte, mask uint32, onSource bool) (*CIDRMatcher, error)
 
 func (v *CIDRMatcher) Apply(ctx context.Context) bool {
 	ips := make([]net.IP, 0, 4)
-	if resolveIPs, ok := proxy.ResolvedIPsFromContext(ctx); ok {
-		for _, rip := range resolveIPs {
+	if resolver, ok := proxy.ResolvedIPsFromContext(ctx); ok {
+		resolvedIPs := resolver.Resolve()
+		for _, rip := range resolvedIPs {
 			if !rip.Family().IsIPv6() {
 				continue
 			}
@@ -192,8 +189,9 @@ func NewIPv4Matcher(ipnet *net.IPNetTable, onSource bool) *IPv4Matcher {
 
 func (v *IPv4Matcher) Apply(ctx context.Context) bool {
 	ips := make([]net.IP, 0, 4)
-	if resolveIPs, ok := proxy.ResolvedIPsFromContext(ctx); ok {
-		for _, rip := range resolveIPs {
+	if resolver, ok := proxy.ResolvedIPsFromContext(ctx); ok {
+		resolvedIPs := resolver.Resolve()
+		for _, rip := range resolvedIPs {
 			if !rip.Family().IsIPv4() {
 				continue
 			}
@@ -313,5 +311,40 @@ func (v *InboundTagMatcher) Apply(ctx context.Context) bool {
 			return true
 		}
 	}
+	return false
+}
+
+type ProtocolMatcher struct {
+	protocols []string
+}
+
+func NewProtocolMatcher(protocols []string) *ProtocolMatcher {
+	pCopy := make([]string, 0, len(protocols))
+
+	for _, p := range protocols {
+		if len(p) > 0 {
+			pCopy = append(pCopy, p)
+		}
+	}
+
+	return &ProtocolMatcher{
+		protocols: pCopy,
+	}
+}
+
+func (m *ProtocolMatcher) Apply(ctx context.Context) bool {
+	result := dispatcher.SniffingResultFromContext(ctx)
+
+	if result == nil {
+		return false
+	}
+
+	protocol := result.Protocol()
+	for _, p := range m.protocols {
+		if strings.HasPrefix(protocol, p) {
+			return true
+		}
+	}
+
 	return false
 }

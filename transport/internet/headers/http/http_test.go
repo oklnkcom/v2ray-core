@@ -16,12 +16,12 @@ func TestReaderWriter(t *testing.T) {
 	assert := With(t)
 
 	cache := buf.New()
-	b := buf.NewLocal(256)
+	b := buf.New()
 	b.AppendSupplier(serial.WriteString("abcd" + ENDING))
 	writer := NewHeaderWriter(b)
 	err := writer.Write(cache)
 	assert(err, IsNil)
-	assert(cache.Len(), Equals, 8)
+	assert(cache.Len(), Equals, int32(8))
 	_, err = cache.Write([]byte{'e', 'f', 'g'})
 	assert(err, IsNil)
 
@@ -57,7 +57,31 @@ func TestRequestHeader(t *testing.T) {
 func TestConnection(t *testing.T) {
 	assert := With(t)
 
-	auth, err := NewHttpAuthenticator(context.Background(), new(Config))
+	auth, err := NewHttpAuthenticator(context.Background(), &Config{
+		Request: &RequestConfig{
+			Method: &Method{Value: "Post"},
+			Uri:    []string{"/testpath"},
+			Header: []*Header{
+				{
+					Name:  "Host",
+					Value: []string{"www.v2ray.com", "www.google.com"},
+				},
+				{
+					Name:  "User-Agent",
+					Value: []string{"Test-Agent"},
+				},
+			},
+		},
+		Response: &ResponseConfig{
+			Version: &Version{
+				Value: "1.1",
+			},
+			Status: &Status{
+				Code:   "404",
+				Reason: "Not Found",
+			},
+		},
+	})
 	assert(err, IsNil)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

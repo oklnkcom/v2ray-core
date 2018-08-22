@@ -6,27 +6,28 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/errors"
+	"v2ray.com/core/common/serial"
 )
 
 var (
-	_ buf.MultiBufferReader = (*connection)(nil)
-	_ buf.MultiBufferWriter = (*connection)(nil)
+	_ buf.Writer = (*connection)(nil)
 )
 
 // connection is a wrapper for net.Conn over WebSocket connection.
 type connection struct {
-	conn   *websocket.Conn
-	reader io.Reader
-
-	mergingReader buf.Reader
-	mergingWriter buf.Writer
+	conn          *websocket.Conn
+	reader        io.Reader
+	mergingWriter *buf.BufferedWriter
+	remoteAddr    net.Addr
 }
 
-func newConnection(conn *websocket.Conn) *connection {
+func newConnection(conn *websocket.Conn, remoteAddr net.Addr) *connection {
 	return &connection{
-		conn: conn,
+		conn:       conn,
+		remoteAddr: remoteAddr,
 	}
 }
 
@@ -45,13 +46,6 @@ func (c *connection) Read(b []byte) (int, error) {
 		}
 		return nBytes, err
 	}
-}
-
-func (c *connection) ReadMultiBuffer() (buf.MultiBuffer, error) {
-	if c.mergingReader == nil {
-		c.mergingReader = buf.NewMergingReader(c)
-	}
-	return c.mergingReader.Read()
 }
 
 func (c *connection) getReader() (io.Reader, error) {
@@ -77,14 +71,26 @@ func (c *connection) Write(b []byte) (int, error) {
 
 func (c *connection) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	if c.mergingWriter == nil {
-		c.mergingWriter = buf.NewMergingWriter(c)
+		c.mergingWriter = buf.NewBufferedWriter(&buf.BufferToBytesWriter{Writer: c})
 	}
-	return c.mergingWriter.Write(mb)
+	if err := c.mergingWriter.WriteMultiBuffer(mb); err != nil {
+		return err
+	}
+	return c.mergingWriter.Flush()
 }
 
 func (c *connection) Close() error {
-	c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second*5))
-	return c.conn.Close()
+	var errors []interface{}
+	if err := c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second*5)); err != nil {
+		errors = append(errors, err)
+	}
+	if err := c.conn.Close(); err != nil {
+		errors = append(errors, err)
+	}
+	if len(errors) > 0 {
+		return newError("failed to close connection").Base(newError(serial.Concat(errors...)))
+	}
+	return nil
 }
 
 func (c *connection) LocalAddr() net.Addr {
@@ -92,7 +98,7 @@ func (c *connection) LocalAddr() net.Addr {
 }
 
 func (c *connection) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
+	return c.remoteAddr
 }
 
 func (c *connection) SetDeadline(t time.Time) error {
